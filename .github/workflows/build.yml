@@ -1,0 +1,112 @@
+name: build
+
+on:
+  workflow_dispatch:
+    inputs:
+      use-cache:
+        type: boolean
+        default: true
+        description: Use binary cache
+
+jobs:
+  build-maadeps:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu
+            arch: x64
+          - os: windows
+            arch: x64
+          - os: windows
+            arch: arm64
+    defaults:
+      run:
+        # working-directory: ${{ matrix.os == 'windows' && 'C:/MaaDeps' || '.' }}
+        shell: bash
+    runs-on: ${{ matrix.os }}-latest
+    steps:
+
+      - run: |
+          mkdir -p 'C:/MaaDeps'
+          rm -r MaaDeps
+          powershell New-Item -ItemType SymbolicLink -Path "MaaDeps" -Target "C:/MaaDeps"
+        working-directory: '..'
+        if: matrix.os == 'windows'
+
+      - uses: actions/checkout@v3
+        with:
+          submodules: 'recursive'
+
+      - uses: actions/cache/restore@v3
+        if: (github.event_name != 'workflow_dispatch') || (github.event.inputs.use-cache == 'true')
+        with:
+          path: |
+            vcpkg/installed/
+            vcpkg/buildtrees/
+          key: cache-${{ matrix.os }}-${{ matrix.arch }}-
+        # TODO: cache $VCPKG_DEFAULT_BINARY_CACHE instead
+
+      - run: |
+          sudo apt-get update -y
+          sudo apt-get upgrade -y
+          sudo apt-get install -y ninja-build python3-pyelftools elfutils patchelf
+        if: runner.os == 'Linux'
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: matrix.os == 'windows'
+        id: msvc-env
+        with:
+          arch: amd64${{ matrix.arch != 'x64' && format('_{0}', matrix.arch) || '' }}
+
+      - name: Setup ccache
+        uses: Chocobo1/setup-ccache-action@v1
+        with:
+          windows_compile_environment: msvc
+
+      - run: |
+          echo "target=${{ matrix.arch }}-${{ runner.os }}" | tr '[:upper:]' '[:lower:]' >> $GITHUB_ENV
+
+      - run: |
+          if python3 build.py --tarball --target maa-$target ; then
+            exit 0
+          fi
+
+          find vcpkg/buildtrees -type f -not -name '*.pdb' -and -not -path 'vcpkg/buildtrees/*/*.log' -delete
+          rm -rf src/
+          rm -rf vcpkg/packages
+
+          python3 build.py --tarball --target maa-$target
+
+      - name: Clean up
+        if: always()
+        run: |
+          # save space first
+          rm -rf vcpkg/packages vcpkg/downloads
+
+          7z a logs.7z vcpkg/buildtrees/*/*.log
+
+          find vcpkg/buildtrees -type f -not -name '*.pdb' -delete
+          find vcpkg/buildtrees -type d -empty -delete
+
+          ls -lah
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: logs-${{ env.target }}
+          path: ${{ matrix.os == 'windows' && 'C:/MaaDeps/' || '' }}logs.7z
+
+      - uses: actions/cache/save@v3
+        if: always()
+        with:
+          path: |
+            vcpkg/installed/
+            vcpkg/buildtrees/
+          key: cache-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: MaaDeps-${{ env.target }}
+          path: ${{ matrix.os == 'windows' && 'C:/MaaDeps/' || '' }}MaaDeps-*
